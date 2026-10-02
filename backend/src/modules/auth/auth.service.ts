@@ -84,6 +84,7 @@ export async function getMe(userId: string) {
   return {
     id: user.id,
     email: user.email,
+    studentId: user.studentId,
     fullName: user.fullName,
     status: user.status,
     roles: user.roles.map((r) => r.role.name),
@@ -97,6 +98,7 @@ export function meFromContext(auth: AuthContext) {
   return {
     id: auth.userId,
     email: auth.email,
+    studentId: auth.studentId,
     fullName: auth.fullName,
     status: 'ACTIVE' as const,
     roles: auth.roles,

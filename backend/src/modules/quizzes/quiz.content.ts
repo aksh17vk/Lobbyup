@@ -115,10 +115,26 @@ export function validateForPublish(content: QuizContent): string[] {
   }
 
   for (const pool of content.pools) {
-    const available = content.questions.filter((q) => q.poolId === pool.id).length;
-    if (available < pool.drawCount) {
-      problems.push(`Pool "${pool.name}" draws ${pool.drawCount} but only has ${available} questions.`);
+    const inPool = content.questions.filter((q) => q.poolId === pool.id);
+    if (inPool.length < pool.drawCount) {
+      problems.push(`Pool "${pool.name}" draws ${pool.drawCount} but only has ${inPool.length} questions.`);
     }
+    // Every student must face the same total: questions drawn from one pool must be worth the same.
+    const marks = new Set(inPool.map((q) => `${q.pointsCents}/${q.negativeCents}`));
+    if (marks.size > 1) problems.push(`Pool "${pool.name}" mixes questions with different marks or negative marks.`);
   }
   return problems;
+}
+
+/**
+ * Marks every attempt is out of: all unpooled questions plus drawCount × the (uniform) marks of
+ * each pool. Computed by the server at publish time; never accepted from clients.
+ */
+export function totalMarksCents(content: QuizContent): number {
+  let total = content.questions.filter((q) => !q.poolId).reduce((n, q) => n + q.pointsCents, 0);
+  for (const pool of content.pools) {
+    const first = content.questions.find((q) => q.poolId === pool.id);
+    total += (first?.pointsCents ?? 0) * pool.drawCount;
+  }
+  return total;
 }

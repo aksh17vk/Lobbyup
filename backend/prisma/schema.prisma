@@ -22,6 +22,8 @@ enum UserStatus {
 model User {
   id                  String     @id @default(uuid()) @db.Uuid
   email               String     @unique
+  /// Institutional student number. Optional (staff have none); unique when present.
+  studentId           String?    @unique @map("student_id")
   fullName            String     @map("full_name")
   passwordHash        String     @map("password_hash")
   status              UserStatus @default(ACTIVE)
@@ -140,6 +142,10 @@ model Quiz {
   shuffleQuestions   Boolean           @default(true) @map("shuffle_questions")
   shuffleOptions     Boolean           @default(true) @map("shuffle_options")
   passingPercentage  Decimal?          @map("passing_percentage") @db.Decimal(5, 2)
+  /// Absolute pass mark. Takes precedence over passingPercentage when both are set.
+  passingMarks       Decimal?          @map("passing_marks") @db.Decimal(8, 2)
+  /// Marks every attempt is out of. Computed by the server at publish time, never client-supplied.
+  totalMarks         Decimal?          @map("total_marks") @db.Decimal(8, 2)
   resultsVisibility  ResultsVisibility @default(AFTER_END) @map("results_visibility")
   violationThreshold Int               @default(5) @map("violation_threshold")
   /// Bumped on every content change; used as part of cache keys.
@@ -242,6 +248,8 @@ model Attempt {
   startedAt      DateTime      @map("started_at") @db.Timestamptz(3)
   expiresAt      DateTime      @map("expires_at") @db.Timestamptz(3)
   submittedAt    DateTime?     @map("submitted_at") @db.Timestamptz(3)
+  /// Final score, written by the server in the grading transaction (mirrors results.score).
+  score          Decimal?      @db.Decimal(8, 2)
   quizVersion    Int           @map("quiz_version")
   ipAddress      String?       @map("ip_address")
 
@@ -305,6 +313,7 @@ model Answer {
   attemptQuestion AttemptQuestion @relation(fields: [attemptId, questionId], references: [attemptId, questionId], onDelete: Cascade)
 
   @@unique([attemptId, questionId])
+  @@index([questionId])
   @@map("answers")
 }
 
@@ -394,6 +403,7 @@ model ExamEvent {
 
   @@unique([attemptId, clientEventId])
   @@index([attemptId, serverTimestamp])
+  @@index([type])
   @@map("exam_events")
 }
 

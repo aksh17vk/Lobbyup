@@ -3,7 +3,7 @@ import { env } from '../../config/env.js';
 import { prisma } from '../../db/prisma.js';
 import { logger } from '../../utils/logger.js';
 import { AppError } from '../../utils/errors.js';
-import { fromCents } from '../../utils/money.js';
+import { fromCents, toCents } from '../../utils/money.js';
 import { dropAttemptBuffer, flushAttemptBuffer } from '../answers/answer.buffer.js';
 import type { AnswerResponseT } from '../answers/answer.schemas.js';
 import { refreshAttemptMeta } from '../attempts/attempt.cache.js';
@@ -77,7 +77,7 @@ export async function finalizeAttempt(attemptId: string): Promise<FinalizeOutcom
     }
 
     const [quiz, attemptQuestions, answers] = await Promise.all([
-      tx.quiz.findUniqueOrThrow({ where: { id: row.quiz_id }, select: { passingPercentage: true } }),
+      tx.quiz.findUniqueOrThrow({ where: { id: row.quiz_id }, select: { passingPercentage: true, passingMarks: true } }),
       tx.attemptQuestion.findMany({ where: { attemptId }, select: { questionId: true } }),
       tx.answer.findMany({ where: { attemptId }, select: { questionId: true, response: true } }),
     ]);
@@ -110,7 +110,13 @@ export async function finalizeAttempt(attemptId: string): Promise<FinalizeOutcom
          WHERE a.attempt_id = ${attemptId}::uuid AND a.question_id = v.question_id`;
     }
 
-    const passing = quiz.passingPercentage === null ? null : Number(quiz.passingPercentage);
+    // Absolute pass mark wins over the percentage rule when both are configured.
+    const passed =
+      quiz.passingMarks !== null
+        ? grade.scoreCents >= toCents(quiz.passingMarks)
+        : quiz.passingPercentage !== null
+          ? grade.percentage >= Number(quiz.passingPercentage)
+          : null;
     const result = await tx.result.create({
       data: {
         attemptId,
@@ -119,7 +125,7 @@ export async function finalizeAttempt(attemptId: string): Promise<FinalizeOutcom
         score: fromCents(grade.scoreCents),
         maxScore: fromCents(grade.maxCents),
         percentage: grade.percentage,
-        passed: passing === null ? null : grade.percentage >= passing,
+        passed,
         correctCount: grade.correct,
         incorrectCount: grade.incorrect,
         unansweredCount: grade.unanswered,
@@ -128,7 +134,10 @@ export async function finalizeAttempt(attemptId: string): Promise<FinalizeOutcom
     // updated_at is when the row moved to SUBMITTING if an older build did not stamp submitted_at.
     const began = row.submitted_at ?? row.updated_at;
     const finalStatus: AttemptStatus = withinDeadline(began, row.expires_at, env.SUBMIT_GRACE_SECONDS) ? 'SUBMITTED' : 'EXPIRED';
-    await tx.attempt.update({ where: { id: attemptId }, data: { status: finalStatus, submittedAt: began } });
+    await tx.attempt.update({
+      where: { id: attemptId },
+      data: { status: finalStatus, submittedAt: began, score: fromCents(grade.scoreCents) },
+    });
     return { status: finalStatus, result, alreadyFinal: false };
   });
 

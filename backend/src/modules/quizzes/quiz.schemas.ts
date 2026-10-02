@@ -14,6 +14,8 @@ const QuizFields = {
   shuffleQuestions: z.boolean(),
   shuffleOptions: z.boolean(),
   passingPercentage: z.number().min(0).max(100).nullish(),
+  /** Absolute pass mark (takes precedence over passingPercentage). Checked against total marks at publish. */
+  passingMarks: z.number().min(0).max(100000).multipleOf(0.01).nullish(),
   resultsVisibility: z.enum(['IMMEDIATE', 'AFTER_END', 'HIDDEN']),
   violationThreshold: z.number().int().min(1).max(1000),
 };

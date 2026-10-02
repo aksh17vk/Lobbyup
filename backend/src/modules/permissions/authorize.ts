@@ -7,6 +7,7 @@ export interface AuthContext {
   sessionId: string;
   email: string;
   fullName: string;
+  studentId: string | null;
   roles: string[];
   permissions: ReadonlySet<string>;
   /** How the token arrived; cookie-authenticated unsafe requests get CSRF checks. */

@@ -6,7 +6,8 @@ import { audit } from '../../utils/audit.js';
 import { AppError, forbidden, notFound } from '../../utils/errors.js';
 import { skipTake } from '../../utils/pagination.js';
 import { assertCanManageQuiz, isSuperAdmin, type AuthContext } from '../permissions/authorize.js';
-import { getQuizContent, validateForPublish } from './quiz.content.js';
+import { getQuizContent, totalMarksCents, validateForPublish } from './quiz.content.js';
+import { fromCents, toCents } from '../../utils/money.js';
 import { isContentEditable, isSettingsEditable, nextQuizStatus, type QuizAction } from './quiz.lifecycle.js';
 import type { AdminQuizListQuery, CreateQuizBody, UpdateQuizBody } from './quiz.schemas.js';
 
@@ -35,6 +36,8 @@ export function publicQuiz(q: Quiz, questionCount?: number) {
     startsAt: q.startsAt,
     endsAt: q.endsAt,
     maxAttempts: q.maxAttempts,
+    totalMarks: q.totalMarks === null ? null : Number(q.totalMarks),
+    passingMarks: q.passingMarks === null ? null : Number(q.passingMarks),
     resultsVisibility: q.resultsVisibility,
     ...(questionCount !== undefined ? { questionCount } : {}),
   };
@@ -96,6 +99,7 @@ export async function createQuiz(auth: AuthContext, input: z.output<typeof Creat
     data: {
       ...input,
       passingPercentage: input.passingPercentage ?? null,
+      passingMarks: input.passingMarks ?? null,
       createdById: auth.userId,
     },
   });
@@ -139,26 +143,45 @@ export async function getQuizAdmin(auth: AuthContext, quizId: string) {
 }
 
 export async function updateQuiz(auth: AuthContext, quizId: string, input: z.output<typeof UpdateQuizBody>) {
-  const quiz = await getQuizOr404(quizId);
-  assertCanManageQuiz(auth, quiz, 'EDIT_EXAM');
-  if (!isSettingsEditable(quiz.status)) {
-    throw new AppError('QUIZ_NOT_EDITABLE', `A quiz in status ${quiz.status} cannot be edited.`);
-  }
-  // Fields that change how attempts are generated/graded are frozen once published.
-  const contentFields = ['durationSeconds', 'shuffleQuestions', 'shuffleOptions', 'maxAttempts'] as const;
-  if (!isContentEditable(quiz.status) && contentFields.some((f) => input[f] !== undefined)) {
-    throw new AppError('QUIZ_NOT_EDITABLE', 'Unpublish the quiz to change duration, shuffling or attempts.');
-  }
-  const startsAt = input.startsAt !== undefined ? input.startsAt : quiz.startsAt;
-  const endsAt = input.endsAt !== undefined ? input.endsAt : quiz.endsAt;
-  if (startsAt && endsAt && endsAt <= startsAt) {
-    throw new AppError('VALIDATION_ERROR', 'endsAt must be after startsAt.');
-  }
+  // Row-locked so a concurrent publish cannot slip a total in between the check and the write.
+  const updated = await prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM quizzes WHERE id = ${quizId}::uuid FOR UPDATE`;
+    if (!locked.length) throw notFound('Quiz');
+    const quiz = await tx.quiz.findUniqueOrThrow({ where: { id: quizId } });
+    assertCanManageQuiz(auth, quiz, 'EDIT_EXAM');
+    if (!isSettingsEditable(quiz.status)) {
+      throw new AppError('QUIZ_NOT_EDITABLE', `A quiz in status ${quiz.status} cannot be edited.`);
+    }
+    // Fields that change how attempts are generated/graded are frozen once published.
+    const contentFields = ['durationSeconds', 'shuffleQuestions', 'shuffleOptions', 'maxAttempts'] as const;
+    if (!isContentEditable(quiz.status) && contentFields.some((f) => input[f] !== undefined)) {
+      throw new AppError('QUIZ_NOT_EDITABLE', 'Unpublish the quiz to change duration, shuffling or attempts.');
+    }
+    if (input.passingMarks != null && quiz.status !== 'DRAFT') {
+      // DRAFT is re-checked at publish; otherwise compare with the real total (computed if missing).
+      const totalCents = await quizTotalCents(quiz);
+      if (toCents(input.passingMarks) > totalCents) {
+        throw new AppError('VALIDATION_ERROR', `passingMarks cannot exceed the quiz total (${fromCents(totalCents)}).`);
+      }
+    }
+    const startsAt = input.startsAt !== undefined ? input.startsAt : quiz.startsAt;
+    const endsAt = input.endsAt !== undefined ? input.endsAt : quiz.endsAt;
+    if (startsAt && endsAt && endsAt <= startsAt) {
+      throw new AppError('VALIDATION_ERROR', 'endsAt must be after startsAt.');
+    }
 
-  const updated = await prisma.quiz.update({ where: { id: quizId }, data: input });
-  await audit(auth.userId, 'quiz.update', 'quiz', quizId, { fields: Object.keys(input) });
+    const result = await tx.quiz.update({ where: { id: quizId }, data: input });
+    await audit(auth.userId, 'quiz.update', 'quiz', quizId, { fields: Object.keys(input) }, tx);
+    return result;
+  });
   await invalidateStudentQuizList();
   return updated;
+}
+
+/** Total marks of a quiz: the stored value, or computed from its content if not stored yet. */
+async function quizTotalCents(quiz: Quiz): Promise<number> {
+  if (quiz.totalMarks !== null) return toCents(quiz.totalMarks);
+  return totalMarksCents(await getQuizContent(quiz.id, quiz.contentVersion));
 }
 
 export async function deleteQuiz(auth: AuthContext, quizId: string) {
@@ -187,13 +210,28 @@ export async function transitionQuiz(auth: AuthContext, quizId: string, action: 
       const quiz = await tx.quiz.findUniqueOrThrow({ where: { id: quizId } });
       const content = await getQuizContent(quizId, quiz.contentVersion);
       const problems = validateForPublish(content);
+      const total = totalMarksCents(content);
+      if (quiz.passingMarks !== null && toCents(quiz.passingMarks) > total) {
+        problems.push(`Passing marks (${Number(quiz.passingMarks)}) exceed total marks (${fromCents(total)}).`);
+      }
       if (problems.length) throw new AppError('VALIDATION_ERROR', 'Quiz is not ready to publish.', problems);
       data.publishedAt = new Date();
+      data.totalMarks = fromCents(total);
+    }
+    if (action === 'activate') {
+      // Quizzes published before total_marks existed (or inserted directly) get it now.
+      const quiz = await tx.quiz.findUniqueOrThrow({ where: { id: quizId } });
+      const total = await quizTotalCents(quiz);
+      if (quiz.passingMarks !== null && toCents(quiz.passingMarks) > total) {
+        throw new AppError('VALIDATION_ERROR', `Passing marks (${Number(quiz.passingMarks)}) exceed total marks (${fromCents(total)}).`);
+      }
+      if (quiz.totalMarks === null) data.totalMarks = fromCents(total);
     }
     if (action === 'unpublish') {
       const attempts = await tx.attempt.count({ where: { quizId } });
       if (attempts > 0) throw new AppError('CONFLICT', 'Quiz already has attempts and cannot be unpublished.');
       data.publishedAt = null;
+      data.totalMarks = null; // recomputed at the next publish
     }
 
     const updated = await tx.quiz.update({ where: { id: quizId }, data });

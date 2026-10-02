@@ -13,10 +13,19 @@ import { mapLimit } from '../../utils/concurrency.js';
 
 const RoleName = z.enum(ROLES);
 
+/** Institutional student number: trimmed, 1–64 chars of letters, digits and . _ - / */
+export const StudentId = z
+  .string()
+  .trim()
+  .min(1)
+  .max(64)
+  .regex(/^[A-Za-z0-9._/-]+$/, 'studentId may only contain letters, digits and . _ - /');
+
 export const CreateUserItem = z
   .object({
     email: Email,
     fullName: z.string().trim().min(1).max(200),
+    studentId: StudentId.optional(),
     password: Password,
     roles: z.array(RoleName).min(1).max(4).default(['STUDENT']),
   })
@@ -30,6 +39,7 @@ export const CreateUsersBody = z.union([
 export const UpdateUserBody = z
   .object({
     fullName: z.string().trim().min(1).max(200).optional(),
+    studentId: StudentId.nullable().optional(),
     status: z.enum(['ACTIVE', 'SUSPENDED', 'DISABLED']).optional(),
   })
   .strict();
@@ -46,6 +56,7 @@ export const UserIdParams = z.object({ userId: z.uuid() });
 const publicUser = {
   id: true,
   email: true,
+  studentId: true,
   fullName: true,
   status: true,
   lastLoginAt: true,
@@ -98,6 +109,12 @@ export async function createUsers(auth: AuthContext, items: z.output<typeof Crea
   if (new Set(emails).size !== emails.length) throw new AppError('VALIDATION_ERROR', 'Duplicate emails in request.');
   const existing = await prisma.user.findMany({ where: { email: { in: emails } }, select: { email: true } });
   if (existing.length) throw new AppError('CONFLICT', 'Some emails already exist.', { emails: existing.map((e) => e.email) });
+  const studentIds = items.map((i) => i.studentId).filter((x): x is string => !!x);
+  if (new Set(studentIds).size !== studentIds.length) throw new AppError('VALIDATION_ERROR', 'Duplicate studentIds in request.');
+  if (studentIds.length) {
+    const taken = await prisma.user.findMany({ where: { studentId: { in: studentIds } }, select: { studentId: true } });
+    if (taken.length) throw new AppError('CONFLICT', 'Some studentIds already exist.', { studentIds: taken.map((t) => t.studentId) });
+  }
 
   const roleMap = new Map((await prisma.role.findMany()).map((r) => [r.name, r.id]));
   const hashes = await mapLimit(items, 4, (u) => hashPassword(u.password));
@@ -107,6 +124,7 @@ export async function createUsers(auth: AuthContext, items: z.output<typeof Crea
       prisma.user.create({
         data: {
           email: u.email,
+          studentId: u.studentId ?? null,
           fullName: u.fullName,
           passwordHash: hashes[i]!,
           roles: { create: u.roles.map((r) => ({ roleId: roleMap.get(r)! })) },
@@ -124,7 +142,13 @@ export async function listUsers(q: z.output<typeof UserListQuery>) {
     ...(q.status ? { status: q.status } : {}),
     ...(q.role ? { roles: { some: { role: { name: q.role } } } } : {}),
     ...(q.q
-      ? { OR: [{ email: { contains: q.q, mode: 'insensitive' } }, { fullName: { contains: q.q, mode: 'insensitive' } }] }
+      ? {
+          OR: [
+            { email: { contains: q.q, mode: 'insensitive' } },
+            { fullName: { contains: q.q, mode: 'insensitive' } },
+            { studentId: { contains: q.q, mode: 'insensitive' } },
+          ],
+        }
       : {}),
   };
   const [items, total] = await Promise.all([

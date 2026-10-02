@@ -14,6 +14,7 @@ const ctx = (roles: (keyof typeof DEFAULT_ROLE_PERMISSIONS)[], userId = 'u1'): A
   sessionId: 's1',
   email: 'x@test',
   fullName: 'X',
+  studentId: null,
   roles,
   permissions: new Set(roles.flatMap((r) => DEFAULT_ROLE_PERMISSIONS[r])),
   via: 'bearer',

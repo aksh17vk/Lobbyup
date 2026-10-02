@@ -15,7 +15,7 @@ export async function getResult(auth: AuthContext, attemptId: string) {
       result: true,
       quiz: true,
       questions: { orderBy: { displayOrder: 'asc' }, include: { answer: true } },
-      user: { select: { id: true, fullName: true, email: true } },
+      user: { select: { id: true, fullName: true, email: true, studentId: true } },
     },
   });
   if (!attempt) throw new AppError('NOT_FOUND', 'Result not found.');

@@ -13,6 +13,7 @@ interface CachedSession {
   userId: string;
   email: string;
   fullName: string;
+  studentId: string | null;
   roles: string[];
   permissions: string[];
   expiresAt: number;
@@ -50,6 +51,7 @@ async function loadFromDb(tokenHash: string): Promise<CachedSession | null> {
     userId: s.userId,
     email: s.user.email,
     fullName: s.user.fullName,
+    studentId: s.user.studentId,
     roles: s.user.roles.map((r) => r.role.name),
     permissions: [...permissions],
     expiresAt: s.expiresAt.getTime(),
@@ -116,6 +118,7 @@ export async function resolveSession(
     sessionId: cached.sessionId,
     email: cached.email,
     fullName: cached.fullName,
+    studentId: cached.studentId ?? null,
     roles: cached.roles,
     permissions: new Set(cached.permissions),
     via,
