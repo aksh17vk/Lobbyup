@@ -1,10 +1,15 @@
 import { buildApp } from './app.js';
-import { env } from './config/env.js';
+import { env, isProd, productionWarnings } from './config/env.js';
 import { prisma } from './db/prisma.js';
 import { redis } from './db/redis.js';
 import { logger } from './utils/logger.js';
 import { startWorkers, stopWorkers } from './workers/index.js';
 import type { Loop } from './workers/loop.js';
+
+if (isProd) {
+  for (const w of productionWarnings(env)) logger.warn(w);
+  if (env.ALLOW_DEV_CREDENTIALS) logger.warn('ALLOW_DEV_CREDENTIALS is on: never use this in a real deployment');
+}
 
 // Redis is optional at boot: every request path falls back to Postgres, and ioredis keeps
 // reconnecting in the background. Only Postgres is required to start.

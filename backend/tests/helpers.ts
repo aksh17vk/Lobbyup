@@ -1,3 +1,4 @@
+import { PrismaClient } from '@prisma/client';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { prisma } from '../src/db/prisma.js';
@@ -9,6 +10,9 @@ import { ALL_PERMISSIONS, DEFAULT_ROLE_PERMISSIONS, PERMISSIONS, ROLES, type Rol
 export { prisma, redis };
 
 let app: FastifyInstance | null = null;
+
+/** Schema-owner connection, used only for resets (the app role cannot TRUNCATE). */
+export const ownerDb = new PrismaClient({ datasourceUrl: process.env.DIRECT_DATABASE_URL });
 
 export async function getApp() {
   if (!app) {
@@ -24,11 +28,12 @@ export async function closeApp() {
   app = null;
   await redis.quit().catch(() => {});
   await prisma.$disconnect();
+  await ownerDb.$disconnect();
 }
 
 /** Wipe all data and re-create the RBAC catalogue. */
 export async function resetDb() {
-  await prisma.$executeRawUnsafe(`
+  await ownerDb.$executeRawUnsafe(`
     TRUNCATE exam_events, answers, results, attempt_questions, exam_sessions, attempts,
              question_options, questions, question_pools, quizzes, sessions, user_roles,
              role_permissions, roles, permissions, users, audit_logs RESTART IDENTITY CASCADE`);

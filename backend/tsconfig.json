@@ -14,5 +14,5 @@
     "sourceMap": true,
     "types": ["node"]
   },
-  "include": ["src", "tests", "prisma", "loadtest/*.ts", "vitest.config.ts"]
+  "include": ["src", "tests", "prisma", "scripts", "loadtest/*.ts", "vitest.config.ts"]
 }

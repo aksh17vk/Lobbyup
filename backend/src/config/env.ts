@@ -6,6 +6,8 @@ const bool = (def: boolean) =>
     .default(def ? 'true' : 'false')
     .transform((v) => v === 'true' || v === '1');
 
+const MAX_TIMER_MS = 2_147_483_647;
+
 const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   HOST: z.string().default('0.0.0.0'),
@@ -63,10 +65,20 @@ const EnvSchema = z.object({
 
   // Workers
   WORKERS_ENABLED: bool(true),
-  ANSWER_FLUSH_INTERVAL_MS: z.coerce.number().int().min(200).default(2000),
-  EXPIRY_SWEEP_INTERVAL_MS: z.coerce.number().int().min(1000).default(15000),
+  // setTimeout caps delays at 2^31-1 ms; larger values would fire immediately in a tight loop.
+  ANSWER_FLUSH_INTERVAL_MS: z.coerce.number().int().min(200).max(MAX_TIMER_MS).default(2000),
+  EXPIRY_SWEEP_INTERVAL_MS: z.coerce.number().int().min(1000).max(MAX_TIMER_MS).default(15000),
+
+  // Privacy / data retention (0 disables a rule)
+  /** Proctoring events and device/IP data of finished attempts are deleted after this many days. */
+  DATA_RETENTION_DAYS: z.coerce.number().int().min(0).default(180),
+  /** Expired/revoked login sessions are deleted after this many days. */
+  SESSION_RETENTION_DAYS: z.coerce.number().int().min(0).default(30),
+  RETENTION_SWEEP_INTERVAL_MS: z.coerce.number().int().min(60_000).max(MAX_TIMER_MS).default(6 * 3600_000),
 
   RATE_LIMIT_ENABLED: bool(true),
+  /** Only for local production-mode testing (e.g. load tests against docker-compose). Never in a real deployment. */
+  ALLOW_DEV_CREDENTIALS: bool(false),
   /**
    * Logins per minute from ONE IP. A whole exam hall often shares one NAT address, so this must
    * exceed the number of students who log in together. Brute force is stopped by per-account lockout.
@@ -89,7 +101,48 @@ function loadEnv(): Env {
     console.error('COOKIE_SAMESITE=none requires COOKIE_SECURE=true');
     process.exit(1);
   }
+  const problems = env.NODE_ENV === 'production' ? productionProblems(env) : [];
+  if (problems.length) {
+    console.error(`Refusing to start in production:\n  - ${problems.join('\n  - ')}`);
+    process.exit(1);
+  }
   return env;
+}
+
+/** Database URLs whose credentials are the public development defaults from docker-compose.yml. */
+const DEV_CREDENTIALS = /\/\/lobbyup:lobbyup@/;
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', 'postgres', 'redis']);
+
+function hostOf(url: string) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return '';
+  }
+}
+
+/** Hard requirements for production: secure cookies and non-default credentials. */
+export function productionProblems(
+  e: Pick<Env, 'COOKIE_SECURE' | 'DATABASE_URL' | 'REDIS_URL' | 'ALLOW_DEV_CREDENTIALS'>,
+): string[] {
+  const out: string[] = [];
+  if (!e.COOKIE_SECURE) out.push('COOKIE_SECURE must be true');
+  if (DEV_CREDENTIALS.test(e.DATABASE_URL) && !e.ALLOW_DEV_CREDENTIALS) {
+    out.push('DATABASE_URL uses the public development credentials (set a strong password)');
+  }
+  return out;
+}
+
+/** Soft requirements: logged as warnings (a same-host database legitimately has no TLS). */
+export function productionWarnings(e: Pick<Env, 'DATABASE_URL' | 'REDIS_URL'>): string[] {
+  const out: string[] = [];
+  if (!LOCAL_HOSTS.has(hostOf(e.DATABASE_URL)) && !/[?&]sslmode=(require|verify-ca|verify-full)/.test(e.DATABASE_URL)) {
+    out.push('DATABASE_URL points to a remote host without sslmode=require: traffic may be unencrypted');
+  }
+  if (!LOCAL_HOSTS.has(hostOf(e.REDIS_URL)) && !e.REDIS_URL.startsWith('rediss://')) {
+    out.push('REDIS_URL points to a remote host without TLS (use rediss://)');
+  }
+  return out;
 }
 
 export const env = loadEnv();

@@ -22,7 +22,10 @@
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration tests/security",
     "test:watch": "vitest",
-    "dev:worker": "tsx --env-file-if-exists=.env src/worker.ts"
+    "dev:worker": "tsx --env-file-if-exists=.env src/worker.ts",
+    "db:roles": "tsx --env-file-if-exists=.env scripts/db-roles.ts",
+    "db:backup": "sh scripts/backup-db.sh",
+    "db:restore": "sh scripts/restore-db.sh"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",

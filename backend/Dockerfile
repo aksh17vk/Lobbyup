@@ -25,5 +25,9 @@ COPY package.json ./
 USER node
 EXPOSE 4000
 ENTRYPOINT ["/sbin/tini", "--"]
-# Apply pending migrations, then start. (Migrations are idempotent.)
-CMD ["sh", "-c", "node node_modules/prisma/build/index.js migrate deploy && node dist/server.js"]
+# Migrations on boot are convenient for a single instance (needs the owner URL in
+# DIRECT_DATABASE_URL). For least privilege, set MIGRATE_ON_BOOT=false and run
+# `prisma migrate deploy` + `pnpm db:roles` as a separate release step, so the running API only
+# ever holds the row-level app role credentials (see docs/DATABASE.md).
+ENV MIGRATE_ON_BOOT=true
+CMD ["sh", "-c", "if [ \"$MIGRATE_ON_BOOT\" = \"true\" ]; then node node_modules/prisma/build/index.js migrate deploy || exit 1; fi; exec node dist/server.js"]
