@@ -1,0 +1,412 @@
+// Lobbyup — PostgreSQL is the permanent source of truth.
+// Redis only holds caches, rate-limit counters and a short-lived answer buffer.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_DATABASE_URL")
+}
+
+// ─────────────────────────────── Identity & RBAC ───────────────────────────────
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DISABLED
+}
+
+model User {
+  id                  String     @id @default(uuid()) @db.Uuid
+  email               String     @unique
+  fullName            String     @map("full_name")
+  passwordHash        String     @map("password_hash")
+  status              UserStatus @default(ACTIVE)
+  failedLoginCount    Int        @default(0) @map("failed_login_count")
+  lockedUntil         DateTime?  @map("locked_until") @db.Timestamptz(3)
+  lastLoginAt         DateTime?  @map("last_login_at") @db.Timestamptz(3)
+  createdAt           DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  roles        UserRole[]
+  sessions     Session[]
+  attempts     Attempt[]     @relation("AttemptUser")
+  examSessions ExamSession[]
+  results      Result[]
+  quizzes      Quiz[]        @relation("QuizCreator")
+  examEvents   ExamEvent[]
+  reviews      Attempt[]     @relation("AttemptReviewer")
+
+  @@map("users")
+}
+
+model Role {
+  id          String           @id @default(uuid()) @db.Uuid
+  name        String           @unique
+  description String?
+  isSystem    Boolean          @default(false) @map("is_system")
+  createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  permissions RolePermission[]
+  users       UserRole[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String           @id @default(uuid()) @db.Uuid
+  key         String           @unique
+  description String?
+  roles       RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String     @map("role_id") @db.Uuid
+  permissionId String     @map("permission_id") @db.Uuid
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  userId    String   @map("user_id") @db.Uuid
+  roleId    String   @map("role_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@index([roleId])
+  @@map("user_roles")
+}
+
+enum SessionStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+}
+
+/// Authentication session. Only a SHA-256 hash of the opaque token is stored.
+model Session {
+  id             String        @id @default(uuid()) @db.Uuid
+  userId         String        @map("user_id") @db.Uuid
+  tokenHash      String        @unique @map("token_hash")
+  status         SessionStatus @default(ACTIVE)
+  ipAddress      String?       @map("ip_address")
+  userAgent      String?       @map("user_agent")
+  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  lastActivityAt DateTime      @default(now()) @map("last_activity_at") @db.Timestamptz(3)
+  expiresAt      DateTime      @map("expires_at") @db.Timestamptz(3)
+  revokedAt      DateTime?     @map("revoked_at") @db.Timestamptz(3)
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  examSessions   ExamSession[]
+
+  @@index([userId, status])
+  @@map("sessions")
+}
+
+// ─────────────────────────────── Quizzes ───────────────────────────────
+
+enum QuizStatus {
+  DRAFT
+  PUBLISHED
+  ACTIVE
+  ENDED
+  ARCHIVED
+}
+
+enum ResultsVisibility {
+  IMMEDIATE
+  AFTER_END
+  HIDDEN
+}
+
+model Quiz {
+  id                 String            @id @default(uuid()) @db.Uuid
+  title              String
+  description        String?
+  instructions       String?
+  status             QuizStatus        @default(DRAFT)
+  durationSeconds    Int               @map("duration_seconds")
+  startsAt           DateTime?         @map("starts_at") @db.Timestamptz(3)
+  endsAt             DateTime?         @map("ends_at") @db.Timestamptz(3)
+  maxAttempts        Int               @default(1) @map("max_attempts")
+  shuffleQuestions   Boolean           @default(true) @map("shuffle_questions")
+  shuffleOptions     Boolean           @default(true) @map("shuffle_options")
+  passingPercentage  Decimal?          @map("passing_percentage") @db.Decimal(5, 2)
+  resultsVisibility  ResultsVisibility @default(AFTER_END) @map("results_visibility")
+  violationThreshold Int               @default(5) @map("violation_threshold")
+  /// Bumped on every content change; used as part of cache keys.
+  contentVersion     Int               @default(1) @map("content_version")
+  createdById        String            @map("created_by_id") @db.Uuid
+  publishedAt        DateTime?         @map("published_at") @db.Timestamptz(3)
+  createdAt          DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  createdBy User           @relation("QuizCreator", fields: [createdById], references: [id])
+  pools     QuestionPool[]
+  questions Question[]
+  attempts  Attempt[]
+  results   Result[]
+
+  @@index([status])
+  @@index([createdById])
+  @@map("quizzes")
+}
+
+/// A pool draws `drawCount` random questions out of its questions for every attempt.
+/// Questions with no pool are always included.
+model QuestionPool {
+  id        String     @id @default(uuid()) @db.Uuid
+  quizId    String     @map("quiz_id") @db.Uuid
+  name      String
+  drawCount Int        @map("draw_count")
+  quiz      Quiz       @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  questions Question[]
+
+  @@unique([quizId, name])
+  @@map("question_pools")
+}
+
+enum QuestionType {
+  SINGLE_CHOICE
+  MULTIPLE_CHOICE
+  SHORT_TEXT
+}
+
+model Question {
+  id              String       @id @default(uuid()) @db.Uuid
+  quizId          String       @map("quiz_id") @db.Uuid
+  poolId          String?      @map("pool_id") @db.Uuid
+  type            QuestionType
+  prompt          String
+  points          Decimal      @default(1) @db.Decimal(6, 2)
+  negativePoints  Decimal      @default(0) @map("negative_points") @db.Decimal(6, 2)
+  /// SHORT_TEXT only: accepted answers, compared case-insensitively after trimming.
+  acceptedAnswers String[]     @map("accepted_answers")
+  position        Int
+  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  quiz             Quiz              @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  pool             QuestionPool?     @relation(fields: [poolId], references: [id], onDelete: SetNull)
+  options          QuestionOption[]
+  attemptQuestions AttemptQuestion[]
+
+  @@index([quizId, position])
+  @@map("questions")
+}
+
+model QuestionOption {
+  id         String   @id @default(uuid()) @db.Uuid
+  questionId String   @map("question_id") @db.Uuid
+  text       String
+  isCorrect  Boolean  @default(false) @map("is_correct")
+  position   Int
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@index([questionId])
+  @@map("question_options")
+}
+
+// ─────────────────────────────── Attempts ───────────────────────────────
+
+enum AttemptStatus {
+  IN_PROGRESS
+  SUBMITTING
+  SUBMITTED
+  EXPIRED
+  CANCELLED
+}
+
+enum ReviewStatus {
+  NONE
+  PENDING
+  CLEARED
+  CONFIRMED
+}
+
+model Attempt {
+  id             String        @id @default(uuid()) @db.Uuid
+  quizId         String        @map("quiz_id") @db.Uuid
+  userId         String        @map("user_id") @db.Uuid
+  attemptNumber  Int           @map("attempt_number")
+  status         AttemptStatus @default(IN_PROGRESS)
+  /// Both computed by the server at start. The client clock is never trusted.
+  startedAt      DateTime      @map("started_at") @db.Timestamptz(3)
+  expiresAt      DateTime      @map("expires_at") @db.Timestamptz(3)
+  submittedAt    DateTime?     @map("submitted_at") @db.Timestamptz(3)
+  quizVersion    Int           @map("quiz_version")
+  ipAddress      String?       @map("ip_address")
+
+  // Anti-cheating aggregation (events → signals → score → flag → human review)
+  violationScore Int           @default(0) @map("violation_score")
+  flaggedAt      DateTime?     @map("flagged_at") @db.Timestamptz(3)
+  reviewStatus   ReviewStatus  @default(NONE) @map("review_status")
+  reviewNotes    String?       @map("review_notes")
+  reviewedById   String?       @map("reviewed_by_id") @db.Uuid
+  reviewedAt     DateTime?     @map("reviewed_at") @db.Timestamptz(3)
+
+  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  quiz         Quiz              @relation(fields: [quizId], references: [id])
+  user         User              @relation("AttemptUser", fields: [userId], references: [id])
+  reviewedBy   User?             @relation("AttemptReviewer", fields: [reviewedById], references: [id])
+  questions    AttemptQuestion[]
+  answers      Answer[]
+  result       Result?
+  examSessions ExamSession[]
+  events       ExamEvent[]
+
+  @@unique([quizId, userId, attemptNumber])
+  @@index([userId, status])
+  @@index([quizId, status])
+  @@index([status, expiresAt])
+  @@index([flaggedAt])
+  @@map("attempts")
+}
+
+/// Persisted per-attempt question mapping (randomised order + option order).
+model AttemptQuestion {
+  attemptId    String   @map("attempt_id") @db.Uuid
+  questionId   String   @map("question_id") @db.Uuid
+  displayOrder Int      @map("display_order")
+  /// Option ids in the order they are displayed for this attempt.
+  optionOrder  String[] @map("option_order")
+  attempt      Attempt  @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  question     Question @relation(fields: [questionId], references: [id])
+  answer       Answer?
+
+  @@id([attemptId, questionId])
+  @@unique([attemptId, displayOrder])
+  @@map("attempt_questions")
+}
+
+model Answer {
+  id             String          @id @default(uuid()) @db.Uuid
+  attemptId      String          @map("attempt_id") @db.Uuid
+  questionId     String          @map("question_id") @db.Uuid
+  /// { "selectedOptionIds": string[] } or { "text": string }
+  response       Json
+  /// Client-supplied monotonically increasing revision; stale writes are ignored.
+  revision       BigInt
+  clientSavedAt  DateTime?       @map("client_saved_at") @db.Timestamptz(3)
+  serverSavedAt  DateTime        @default(now()) @map("server_saved_at") @db.Timestamptz(3)
+  isCorrect      Boolean?        @map("is_correct")
+  pointsAwarded  Decimal?        @map("points_awarded") @db.Decimal(6, 2)
+  attempt        Attempt         @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  attemptQuestion AttemptQuestion @relation(fields: [attemptId, questionId], references: [attemptId, questionId], onDelete: Cascade)
+
+  @@unique([attemptId, questionId])
+  @@map("answers")
+}
+
+model Result {
+  id              String   @id @default(uuid()) @db.Uuid
+  attemptId       String   @unique @map("attempt_id") @db.Uuid
+  userId          String   @map("user_id") @db.Uuid
+  quizId          String   @map("quiz_id") @db.Uuid
+  score           Decimal  @db.Decimal(8, 2)
+  maxScore        Decimal  @map("max_score") @db.Decimal(8, 2)
+  percentage      Decimal  @db.Decimal(5, 2)
+  passed          Boolean?
+  correctCount    Int      @map("correct_count")
+  incorrectCount  Int      @map("incorrect_count")
+  unansweredCount Int      @map("unanswered_count")
+  gradedAt        DateTime @default(now()) @map("graded_at") @db.Timestamptz(3)
+  attempt         Attempt  @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  user            User     @relation(fields: [userId], references: [id])
+  quiz            Quiz     @relation(fields: [quizId], references: [id])
+
+  @@index([quizId])
+  @@index([userId])
+  @@map("results")
+}
+
+// ─────────────────────────────── Exam sessions & events ───────────────────────────────
+
+enum ExamSessionStatus {
+  ACTIVE
+  SUPERSEDED
+  CLOSED
+}
+
+/// The single controlled device/browser session allowed to write to an attempt.
+model ExamSession {
+  id             String            @id @default(uuid()) @db.Uuid
+  attemptId      String            @map("attempt_id") @db.Uuid
+  userId         String            @map("user_id") @db.Uuid
+  authSessionId  String            @map("auth_session_id") @db.Uuid
+  status         ExamSessionStatus @default(ACTIVE)
+  deviceInfo     Json?             @map("device_info")
+  ipAddress      String?           @map("ip_address")
+  userAgent      String?           @map("user_agent")
+  createdAt      DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  lastActivityAt DateTime          @default(now()) @map("last_activity_at") @db.Timestamptz(3)
+  expiresAt      DateTime          @map("expires_at") @db.Timestamptz(3)
+  endedAt        DateTime?         @map("ended_at") @db.Timestamptz(3)
+  attempt        Attempt           @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  user           User              @relation(fields: [userId], references: [id])
+  authSession    Session           @relation(fields: [authSessionId], references: [id], onDelete: Cascade)
+
+  @@index([attemptId, status])
+  @@map("exam_sessions")
+}
+
+enum ExamEventType {
+  TAB_HIDDEN
+  TAB_VISIBLE
+  WINDOW_BLUR
+  WINDOW_FOCUS
+  FULLSCREEN_ENTER
+  FULLSCREEN_EXIT
+  COPY_ATTEMPT
+  PASTE_ATTEMPT
+  RIGHT_CLICK
+  OFFLINE
+  ONLINE
+  SESSION_CHANGE
+  SUBMIT_ATTEMPT
+}
+
+model ExamEvent {
+  id              BigInt        @id @default(autoincrement())
+  attemptId       String        @map("attempt_id") @db.Uuid
+  userId          String        @map("user_id") @db.Uuid
+  examSessionId   String?       @map("exam_session_id") @db.Uuid
+  type            ExamEventType
+  /// Client-generated id; makes event ingestion idempotent on retries.
+  clientEventId   String        @map("client_event_id")
+  clientTimestamp DateTime?     @map("client_timestamp") @db.Timestamptz(3)
+  serverTimestamp DateTime      @default(now()) @map("server_timestamp") @db.Timestamptz(3)
+  metadata        Json?
+  /// Signal weight assigned by the server (0 = informational only).
+  weight          Int           @default(0)
+  attempt         Attempt       @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  user            User          @relation(fields: [userId], references: [id])
+
+  @@unique([attemptId, clientEventId])
+  @@index([attemptId, serverTimestamp])
+  @@map("exam_events")
+}
+
+model AuditLog {
+  id         BigInt   @id @default(autoincrement())
+  actorId    String?  @map("actor_id") @db.Uuid
+  action     String
+  entityType String   @map("entity_type")
+  entityId   String?  @map("entity_id")
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
