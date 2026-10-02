@@ -4,6 +4,8 @@ Online quiz / examination API built for roughly 500 concurrent students on ₹0 
 
 **Stack:** Node.js (≥ 20.11) · TypeScript · Fastify 5 · PostgreSQL (Prisma 6) · Redis (ioredis) · Zod 4 · Argon2id · Vitest · k6 · Docker · pnpm
 
+More detail: **[docs/DATABASE.md](docs/DATABASE.md)** (schema, constraints, least-privilege roles, TLS, migration and backup strategy) and **[docs/PRIVACY.md](docs/PRIVACY.md)** (data inventory, minimisation, retention).
+
 It is a **modular monolith**: one deployable, with a module per domain area. There are no microservices, queues, or Kubernetes. PostgreSQL is the source of truth. Redis holds only caches, rate-limit counters, and a short-lived answer buffer that is always drained into Postgres.
 
 ```
@@ -60,9 +62,11 @@ src/
 │   ├── results/             visibility rules, per-question breakdown
 │   ├── exam-events/         anti-cheating events → signals → flag
 │   └── admin/               attempts, violations, review, results, system status
-├── workers/                 answer flush (write-behind), expiry sweep
+├── workers/                 answer flush (write-behind), expiry sweep, privacy retention
 ├── app.ts  server.ts  worker.ts
 prisma/                      schema, migrations (+ hand-written partial unique indexes), seed
+scripts/                     db-roles.ts (least-privilege app role), backup-db.sh, restore-db.sh
+docs/                        DATABASE.md, PRIVACY.md
 tests/unit · tests/integration · tests/security
 loadtest/                    seed, k6 scenario, integrity verifier
 ```
@@ -214,7 +218,7 @@ Limits are keyed by **user**, so a whole exam hall behind one NAT IP doesn't sha
 | Redis | Upstash free (`rediss://…`) or Redis on the same VM | Supports Lua. An autosave costs about 4 Redis commands (session cache, rate limit, attempt state, save script). 500 students saving every 10 s for an hour ≈ 180k saves ≈ 720k commands, which **can exceed a free monthly quota in a single exam**. Check your plan. If it's tight, use `ANSWER_BUFFER=direct` or self-host Redis next to the API. |
 | Frontend | Vercel | Proxy `/api` through Next.js rewrites to keep cookies first-party with `SameSite=lax`. Otherwise use `COOKIE_SAMESITE=none`. |
 
-The Docker image runs `prisma migrate deploy` on boot. Required secrets come from environment variables only; `.env` is git-ignored.
+The Docker image runs `prisma migrate deploy` on boot by default. For least privilege, set `MIGRATE_ON_BOOT=false`, run migrations and `pnpm db:roles` as a release step with the owner URL, and give the API only the app-role URL (see docs/DATABASE.md). In production the API refuses to start with insecure cookies or the dev database password. Required secrets come from environment variables only; `.env` is git-ignored.
 
 **Most headroom for ₹0:** a free-tier VM (for example Oracle Cloud Always Free) running `docker compose` with the API, Postgres and Redis on the same machine. That removes every per-request network hop and command quota. Back up Postgres off-box.
 
@@ -226,7 +230,7 @@ To scale later: run several API instances behind a load balancer (they're statel
 
 ```bash
 LOADTEST_STUDENTS=500 pnpm loadtest:seed     # 500 students + a 40-question ACTIVE quiz → loadtest/fixture.json
-NODE_ENV=production AUTH_RETURN_TOKEN=true pnpm start
+NODE_ENV=production COOKIE_SECURE=true ALLOW_DEV_CREDENTIALS=true AUTH_RETURN_TOKEN=true pnpm start   # local stack only
 docker run --rm -v "$PWD/loadtest:/scripts" grafana/k6 run \
   -e BASE_URL=http://host.docker.internal:4000 -e VUS=500 /scripts/exam.k6.js
 pnpm exec tsx --env-file=.env loadtest/verify-loadtest.ts <distinct_answers_saved> <attempts_submitted>
