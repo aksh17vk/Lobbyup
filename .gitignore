@@ -1,0 +1,8 @@
+# Safety net for the whole repo (each app also has its own .gitignore)
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+*.log
