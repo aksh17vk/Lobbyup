@@ -49,6 +49,10 @@ export async function startAttempt(auth: AuthContext, quizId: string, client: Cl
 
   const previous = await prisma.attempt.count({ where: { quizId, userId: auth.userId } });
   if (previous >= quiz.maxAttempts) {
+    // A concurrent start (double click, second tab) may have just created the attempt we are
+    // counting: resume it instead of reporting the attempts as used up.
+    const justCreated = await findLiveAttempt(quizId, auth.userId);
+    if (justCreated) return { ...(await resumeExisting(auth, justCreated, client)), created: false };
     throw new AppError('MAX_ATTEMPTS_REACHED', 'You have used all attempts for this quiz.', { maxAttempts: quiz.maxAttempts });
   }
 

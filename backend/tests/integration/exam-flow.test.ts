@@ -51,6 +51,7 @@ describe('exam flow', () => {
     const results = await Promise.all(
       Array.from({ length: 8 }, () => s.inject({ method: 'POST', url: '/api/v1/attempts', payload: { quizId } })),
     );
+    if (!results.every((r) => r.statusCode === 200 || r.statusCode === 201)) console.log('STARTCODES', results.map((r) => r.statusCode + ' ' + r.body.slice(0, 160)).join(' | '));
     expect(results.every((r) => r.statusCode === 200 || r.statusCode === 201)).toBe(true);
     expect(new Set(results.map((r) => r.json().data.attempt.id)).size).toBe(1);
     expect(await prisma.attempt.count({ where: { quizId, userId: s.userId } })).toBe(1);
