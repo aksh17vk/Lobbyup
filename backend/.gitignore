@@ -8,3 +8,6 @@ coverage/
 loadtest/*.log
 loadtest/summary-*.json
 loadtest/fixture.json
+backups/
+*.dump
+*.dump.gpg

@@ -6,3 +6,8 @@ coverage/
 .env.*
 !.env.example
 *.log
+
+# Database dumps contain student data: never commit them
+backups/
+*.dump
+*.dump.gpg
