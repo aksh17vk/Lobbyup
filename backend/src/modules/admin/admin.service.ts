@@ -44,7 +44,7 @@ const attemptSummary = {
   violationScore: true,
   flaggedAt: true,
   reviewStatus: true,
-  user: { select: { id: true, fullName: true, email: true } },
+  user: { select: { id: true, fullName: true, email: true, studentId: true } },
   quiz: { select: { id: true, title: true } },
   result: { select: { score: true, maxScore: true, percentage: true, passed: true } },
 } satisfies Prisma.AttemptSelect;
@@ -63,23 +63,38 @@ export async function listAttempts(q: z.output<typeof AdminAttemptQuery>) {
   return { items, total };
 }
 
-export async function getAttemptDetail(attemptId: string) {
+/**
+ * Proctoring data (IP addresses, devices, event counts) is only included for callers who also hold
+ * VIEW_VIOLATIONS; VIEW_ATTEMPTS alone shows the attempt itself.
+ */
+export async function getAttemptDetail(auth: AuthContext, attemptId: string) {
+  const proctoring = auth.permissions.has('VIEW_VIOLATIONS');
   const attempt = await prisma.attempt.findUnique({
     where: { id: attemptId },
     select: {
       ...attemptSummary,
-      ipAddress: true,
+      ipAddress: proctoring,
       reviewNotes: true,
       reviewedAt: true,
       reviewedBy: { select: { id: true, fullName: true } },
       examSessions: {
         orderBy: { createdAt: 'asc' },
-        select: { id: true, status: true, ipAddress: true, userAgent: true, deviceInfo: true, createdAt: true, lastActivityAt: true, endedAt: true },
+        select: {
+          id: true,
+          status: true,
+          ipAddress: proctoring,
+          userAgent: proctoring,
+          deviceInfo: proctoring,
+          createdAt: true,
+          lastActivityAt: true,
+          endedAt: true,
+        },
       },
       _count: { select: { answers: true, questions: true } },
     },
   });
   if (!attempt) throw notFound('Attempt');
+  if (!proctoring) return attempt;
   const eventCounts = await prisma.examEvent.groupBy({ by: ['type'], where: { attemptId }, _count: { _all: true } });
   return { ...attempt, eventCounts: Object.fromEntries(eventCounts.map((e) => [e.type, e._count._all])) };
 }
@@ -170,7 +185,7 @@ export async function listResults(q: z.output<typeof AdminResultQuery>) {
       orderBy: { gradedAt: 'desc' },
       ...skipTake(q),
       include: {
-        user: { select: { id: true, fullName: true, email: true } },
+        user: { select: { id: true, fullName: true, email: true, studentId: true } },
         quiz: { select: { id: true, title: true } },
         attempt: { select: { status: true, violationScore: true, reviewStatus: true } },
       },

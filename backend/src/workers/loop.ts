@@ -5,14 +5,14 @@ export interface Loop {
 }
 
 /** Runs `tick` every `intervalMs`, never overlapping itself, and stops cleanly. */
-export function startLoop(name: string, intervalMs: number, tick: () => Promise<void>): Loop {
+export function startLoop(name: string, intervalMs: number, tick: () => Promise<void>, firstDelayMs = intervalMs): Loop {
   let stopped = false;
   let running: Promise<void> | null = null;
   let timer: NodeJS.Timeout | null = null;
 
-  const schedule = () => {
+  const schedule = (delay = intervalMs) => {
     if (stopped) return;
-    timer = setTimeout(run, intervalMs);
+    timer = setTimeout(run, delay);
     timer.unref();
   };
   const run = () => {
@@ -23,7 +23,7 @@ export function startLoop(name: string, intervalMs: number, tick: () => Promise<
         schedule();
       });
   };
-  schedule();
+  schedule(firstDelayMs);
 
   return {
     async stop() {

@@ -149,7 +149,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.get('/attempts/:attemptId', { preHandler: requirePermission('VIEW_ATTEMPTS') }, async (req, reply) => {
     const { attemptId } = parse(AttemptParams, req.params, 'params');
-    return ok(reply, await getAttemptDetail(attemptId));
+    return ok(reply, await getAttemptDetail(requireAuthContext(req.auth), attemptId));
   });
 
   app.get('/attempts/:attemptId/events', { preHandler: requirePermission('VIEW_VIOLATIONS') }, async (req, reply) => {

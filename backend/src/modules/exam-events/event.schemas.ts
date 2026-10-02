@@ -1,8 +1,17 @@
 import { z } from 'zod';
 import { EVENT_TYPES } from './signals.js';
 
+/**
+ * Data minimisation: metadata is a small flat map of scalars (e.g. { durationMs: 1200, key: "c" }).
+ * Nested objects and long strings are rejected so clients cannot ship pasted content, page
+ * snapshots or other personal data with proctoring events.
+ */
 const Metadata = z
-  .record(z.string().max(64), z.unknown())
+  .record(
+    z.string().regex(/^[A-Za-z0-9_]{1,40}$/, 'metadata keys must be short identifiers'),
+    z.union([z.string().max(200), z.number().finite(), z.boolean(), z.null()]),
+  )
+  .refine((m) => Object.keys(m).length <= 12, { message: 'metadata may have at most 12 keys' })
   .refine((m) => JSON.stringify(m).length <= 1024, { message: 'metadata must be at most 1 KB' });
 
 export const EventItem = z
